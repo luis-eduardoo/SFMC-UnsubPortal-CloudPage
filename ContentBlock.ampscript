@@ -1,0 +1,132 @@
+%%[
+  /* Variáveis principais */
+  VAR @subscriberKey, @operador, @optout_email, @optout_sms, @optout_whatsapp
+  VAR @message, @dataAtual, @hasOptout, @protocolo
+  VAR @capturedEmail, @capturedDocument, @capturedTelefone
+  VAR @flagEmail, @flagSMS, @flagWA, @checkRow, @rowCount
+  VAR @updateStatusMessage, @updateErrorCode
+
+  /* Inicializações */
+  SET @message = ""
+  SET @hasOptout = false
+
+  /* Request Parameters */
+  SET @subscriberKey = RequestParameter("subscriberKey")
+  SET @operador = RequestParameter("operador")
+  SET @optout_email = IIF(EMPTY(RequestParameter("optout_email")), "false", RequestParameter("optout_email"))
+  SET @optout_sms = IIF(EMPTY(RequestParameter("optout_sms")), "false", RequestParameter("optout_sms"))
+  SET @optout_whatsapp = IIF(EMPTY(RequestParameter("optout_whatsapp")), "false", RequestParameter("optout_whatsapp"))
+
+  SET @dataAtual = Format(Now(), "yyyy-MM-dd")
+  SET @protocolo = Concat("OPT-TON-", @subscriberKey, "-", Format(Now(), "MMddyyyyHHmmss"))
+
+  /* Verifica se formulário foi submetido */
+  IF NOT EMPTY(@subscriberKey) THEN
+
+    /* Verifica se o subscriberKey existe na DE */
+    SET @checkRow = LookupRows("[YOUR MAIN DE]", "[COLUMN CONTACTKEY]", @subscriberKey) /* Query on a main Data Extension. ex. DE_CLIENTES */
+    SET @rowCount = RowCount(@checkRow)
+
+    IF @rowCount > 0 THEN
+
+      /* Lookups */
+      SET @capturedEmail = Field(Row(@checkRow, 1), "Email")
+      SET @capturedDocument = Field(Row(@checkRow, 1), "document")
+      SET @capturedTelefone = Field(Row(@checkRow, 1), "phone")
+
+      /* Limpeza e padronização do telefone */
+      IF NOT EMPTY(@capturedTelefone) THEN
+        SET @capturedTelefone = Replace(@capturedTelefone, " ", "")
+        SET @capturedTelefone = Replace(@capturedTelefone, "-", "")
+        SET @capturedTelefone = Replace(@capturedTelefone, "(", "")
+        SET @capturedTelefone = Replace(@capturedTelefone, ")", "")
+        SET @capturedTelefone = Replace(@capturedTelefone, "+", "")
+
+        IF IndexOf(@capturedTelefone, "55") != 1 THEN
+          IF Length(@capturedTelefone) == 11 THEN
+            SET @capturedTelefone = Concat("55", @capturedTelefone)
+          ENDIF
+        ENDIF
+      ENDIF
+
+      /* Opt-out de E-mail */
+      IF @optout_email == "true" THEN
+        SET @subscriberObject = CreateObject("Subscriber")
+        SetObjectProperty(@subscriberObject, "SubscriberKey", @subscriberKey)
+        SetObjectProperty(@subscriberObject, "Status", "Unsubscribed")
+        SET @updateStatusEmail = InvokeUpdate(@subscriberObject, @updateStatusMessage, @updateErrorCode)
+        SET @hasOptout = true
+      ENDIF
+
+      /* Opt-out de SMS */
+      IF @optout_sms == "true" THEN
+        IF NOT EMPTY(@capturedTelefone) THEN
+          SET @insertSMS = InsertData("TB_SMS_PORTAL-UNSUB_TON", /* Create a table with exactly these columns  */
+            "user_id", @subscriberKey,
+            "phone", @capturedTelefone,
+            "locale", "BR",
+            "status", "unsubscribed",
+            "protocolo", @protocolo,
+            "operador", @operador,
+            "OptOutDate", @dataAtual
+          )
+          SET @hasOptout = true
+        ELSE
+          SET @message = Concat("Não foi possível processar o opt-out de SMS: número de telefone não encontrado para o user_id ", @subscriberKey)
+        ENDIF
+      ENDIF
+
+      /* Opt-out de WhatsApp */
+      IF @optout_whatsapp == "true" THEN
+        IF NOT EMPTY(@capturedTelefone) THEN
+          SET @insertWA = InsertData("TB_WHATSAPP_PORTAL-UNSUB_TON", /* Create a table with exactly these columns  */
+            "user_id", @subscriberKey, 
+            "phone", @capturedTelefone,
+            "Locale", "BR",
+            "OptOutStatus", "1",
+            "Protocolo", @protocolo,
+            "Operador", @operador,
+            "OptOutDate", @dataAtual
+          )
+          SET @hasOptout = true
+        ELSE
+          SET @message = Concat("Não foi possível processar o opt-out de WhatsApp: número de telefone não encontrado para o user_id ", @subscriberKey)
+        ENDIF
+      ENDIF
+
+      /* Histórico */
+      IF @optout_email == "true" OR @optout_sms == "true" OR @optout_whatsapp == "true" THEN
+        SET @flagEmail = IIF(@optout_email == "true", "true", "false")
+        SET @flagSMS = IIF(@optout_sms == "true", "true", "false")
+        SET @flagWA = IIF(@optout_whatsapp == "true", "true", "false")
+
+        SET @insertHistory = InsertData("TB_HISTORICO_PORTAL-UNSUB_TON", /* Create a table with exactly these columns  */
+          "user_id", @subscriberKey,
+          "document", @capturedDocument,
+          "email", @capturedEmail,
+          "telefone", @capturedTelefone,
+          "FlagOptOutEmail", @flagEmail,
+          "FlagOptOutSMS", @flagSMS,
+          "FlagOptOutWhatsApp", @flagWA,
+          "protocolo", @protocolo,
+          "operador", @operador,
+          "DataSolicitacao", @dataAtual
+        )
+        SET @hasOptout = true
+      ENDIF
+
+      IF @hasOptout THEN
+        SET @message = "Opt-out realizado com sucesso."
+      ELSE
+        SET @message = "Nenhum canal selecionado para Opt-out."
+      ENDIF
+
+    ELSE
+      /* user_id não encontrado */
+      SET @message = "⚠️ user_id não encontrado em nossa base, por favor entre em contato com o Time de Canais."
+    ENDIF
+
+  ELSEIF NOT EMPTY(RequestParameter("optout_email")) OR NOT EMPTY(RequestParameter("optout_sms")) OR NOT EMPTY(RequestParameter("optout_whatsapp")) THEN
+    SET @message = "Por favor, insira um user_id."
+  ENDIF
+]%%
